@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Secrets — NE JAMAIS COMMITTER
+.env
+backend/.env
+frontend/.env.local
+
+# Données uploadées (générées à runtime)
+backend/data/input/
+backend/data/output/
+
+# Fichiers financiers réels (données confidentielles)
+backend/data/samples/*.xlsx
+backend/data/samples/*.csv
+backend/data/samples/*.pdf
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/tsconfig.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# LaTeX build artifacts
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.nav
+*.out
+*.snm
+*.synctex.gz
+*.toc
+*.vrb
+
+# Dossier data/ racine (résidu de migration)
+/data/
+
+CLAUDE.md

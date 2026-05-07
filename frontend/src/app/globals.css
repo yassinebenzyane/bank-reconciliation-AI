@@ -1,0 +1,122 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-base:   #080d1a;
+  --bg-paper:  #0c1526;
+  --bg-raised: #111e35;
+  --border:    #1a2a44;
+  --primary:   #3b82f6;
+  --success:   #10b981;
+  --warning:   #f59e0b;
+  --danger:    #ef4444;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  background: var(--bg-base);
+  color: #e2e8f0;
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Subtle dot grid background */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: radial-gradient(rgba(59,130,246,0.08) 1px, transparent 1px);
+  background-size: 28px 28px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #2d5580; }
+
+/* ── Markdown ─────────────────────────────────────────────────── */
+.prose-chat h1 { @apply text-base font-bold text-white mb-2 mt-3; }
+.prose-chat h2 {
+  @apply text-sm font-semibold text-white mb-1.5 mt-3 pb-1.5;
+  border-bottom: 1px solid rgba(59,130,246,0.2);
+}
+.prose-chat h3 { @apply text-sm font-semibold text-blue-200 mb-1 mt-2; }
+.prose-chat p  { @apply leading-relaxed mb-1.5 text-slate-300 text-sm; }
+.prose-chat ul { @apply list-disc ml-5 mb-2 space-y-1; }
+.prose-chat ol { @apply list-decimal ml-5 mb-2 space-y-1; }
+.prose-chat li { @apply leading-relaxed text-slate-300 text-sm; }
+.prose-chat strong { @apply text-white font-semibold; }
+.prose-chat em    { @apply text-slate-400 italic; }
+.prose-chat code  {
+  @apply text-[11px] font-mono px-1.5 py-0.5 rounded;
+  background: rgba(59,130,246,0.12);
+  color: #93c5fd;
+  border: 1px solid rgba(59,130,246,0.18);
+}
+.prose-chat pre {
+  @apply bg-slate-950/80 border border-slate-800 rounded-xl p-4 overflow-x-auto mb-3;
+}
+.prose-chat pre code {
+  @apply bg-transparent px-0 py-0 border-0 text-slate-300 text-xs;
+}
+.prose-chat hr { @apply my-3; border-color: rgba(30,58,95,0.8); }
+.prose-chat blockquote {
+  @apply border-l-2 pl-3 italic my-2 rounded-r py-1 text-sm;
+  border-color: rgba(59,130,246,0.5);
+  background: rgba(59,130,246,0.05);
+  color: #94a3b8;
+}
+
+/* Tables */
+.prose-chat table { @apply w-full text-xs border-collapse; }
+.prose-chat thead tr { border-bottom: 1px solid rgba(59,130,246,0.2); }
+.prose-chat th {
+  @apply font-semibold px-3 py-2 text-left text-[10px] uppercase tracking-wider whitespace-nowrap;
+  background: rgba(59,130,246,0.08);
+  color: #7dd3fc;
+}
+.prose-chat td {
+  @apply px-3 py-2 text-slate-300;
+  border-bottom: 1px solid rgba(30,58,95,0.5);
+}
+.prose-chat tbody tr:hover td { background: rgba(59,130,246,0.04); }
+.prose-chat tbody tr:last-child td { border-bottom: none; }
+
+/* ── Animations ───────────────────────────────────────────────── */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+.animate-blink { animation: blink 0.9s step-end infinite; }
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in { animation: fade-in 0.22s ease-out; }
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-slide-up { animation: slide-up 0.22s ease-out; }
+
+@keyframes ping-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%       { transform: scale(1.4); opacity: 0.6; }
+}
+.animate-ping-dot { animation: ping-dot 1.8s ease-in-out infinite; }
+
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0); }
+  50%       { box-shadow: 0 0 12px 2px rgba(59,130,246,0.25); }
+}
+.animate-glow { animation: glow-pulse 3s ease-in-out infinite; }
