@@ -87,15 +87,26 @@ def _run_parse(csv_path: str | None, xlsx_path: str | None) -> dict:
     result = {}
 
     if csv_path:
+        from src.crew.agents.classeur.main import run as classeur_run
         releve  = raw.get("releve_bancaire", [])
         meta_r  = next((r for r in releve if r.get("_meta")), {})
         txns    = [r for r in releve if not r.get("_meta")]
-        debits  = sum(r["montant"] for r in txns if r.get("sens") == "debit")
-        credits = sum(r["montant"] for r in txns if r.get("sens") == "credit")
+
+        # Classification des transactions par l'Agent Classeur
+        txns = classeur_run(txns)
+
+        debits  = sum(float(r["montant"] or 0) for r in txns if r.get("sens") == "debit")
+        credits = sum(float(r["montant"] or 0) for r in txns if r.get("sens") == "credit")
         types: dict[str, int] = {}
+        categories: dict[str, int] = {}
+        anomalies: list[str] = []
         for t in txns:
             k = t.get("type_operation", "??")
             types[k] = types.get(k, 0) + 1
+            cat = t.get("categorie", "inconnu")
+            categories[cat] = categories.get(cat, 0) + 1
+            if t.get("anomalie"):
+                anomalies.append(t["anomalie"])
         result["csv"] = {
             "nb_transactions": len(txns),
             "solde_initial":   meta_r.get("solde_initial", 0),
@@ -103,6 +114,8 @@ def _run_parse(csv_path: str | None, xlsx_path: str | None) -> dict:
             "total_debits":    float(debits),
             "total_credits":   float(credits),
             "types":           types,
+            "categories":      categories,
+            "anomalies":       anomalies,
             "transactions":    txns,
         }
 
@@ -167,6 +180,14 @@ def _run_parse(csv_path: str | None, xlsx_path: str | None) -> dict:
             "budget_treso":    budget_flat,
         }
 
+    # Rapprochement encaissements ↔ factures ouvertes
+    if csv_path and xlsx_path:
+        from src.crew.agents.verificateur.main import run as verificateur_run
+        encaissements = [t for t in txns if t.get("categorie") == "encaissement_client"]
+        factures_ouvertes = result.get("xlsx", {}).get("factures", [])
+        if encaissements and factures_ouvertes:
+            result["matches"] = verificateur_run(encaissements, factures_ouvertes)
+
     return result
 
 
@@ -204,6 +225,27 @@ def _format_parse_report(parsed: dict) -> str:
         ]
         for code, count in sorted(c["types"].items()):
             lines.append(f"- `{code}` {type_labels.get(code, '')} : **{count}**")
+
+        cat_labels = {
+            "encaissement_client": "Encaissements clients",
+            "paiement_st":         "Paiements sous-traitants",
+            "prelevement":         "Prélèvements",
+            "note_de_frais":       "Notes de frais",
+            "international":       "Virements internationaux",
+            "frais_bancaires":     "Frais bancaires",
+            "divers":              "Divers",
+            "inconnu":             "Non classifiés",
+        }
+        categories = c.get("categories", {})
+        if categories:
+            lines += ["", "**Classification Classeur :**"]
+            for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
+                lines.append(f"- {cat_labels.get(cat, cat)} : **{count}**")
+        anomalies = c.get("anomalies", [])
+        if anomalies:
+            lines += ["", f"⚠️ **{len(anomalies)} anomalie(s) détectée(s)**"]
+            for a in anomalies[:3]:
+                lines.append(f"- {a}")
 
         txns = c.get("transactions", [])
         if txns:
@@ -309,6 +351,31 @@ def _format_parse_report(parsed: dict) -> str:
                 f"| **Tréso fin** | **{budget_mois.get('tresorerie_fin') or 0:,.2f} €** | — |",
             ]
 
+    matches = parsed.get("matches", [])
+    if matches:
+        exact   = [m for m in matches if m.get("statut") == "match_exact"]
+        no_match = [m for m in matches if m.get("statut") == "pas_de_match"]
+        lines += [
+            "",
+            "---",
+            "",
+            "## Rapprochement",
+            "",
+            f"**{len(exact)}/{len(matches)} encaissements rapprochés**",
+        ]
+        for m in exact:
+            ids = ", ".join(str(f) for f in m.get("factures_ids", []))
+            lines.append(
+                f"- ✅ **{m.get('client', '?')}** — "
+                f"{float(m.get('montant', 0)):,.2f} € → {ids} "
+                f"(écart {float(m.get('ecart', 0)):.2f} €)"
+            )
+        for m in no_match:
+            lines.append(
+                f"- ❌ **{m.get('client', '?')}** — "
+                f"{float(m.get('montant', 0)):,.2f} € → aucune combinaison trouvée"
+            )
+
     if "csv" in parsed and "xlsx" in parsed:
         lines += [
             "",
@@ -336,8 +403,8 @@ def _build_data_context(parsed: dict) -> str:
         if txns:
             rows = [
                 f"  {t.get('date_operation','')} | {t.get('sens','')} | "
-                f"{t.get('montant') or 0:,.2f} € | type={t.get('type_operation','')} | "
-                f"{str(t.get('libelle',''))}"
+                f"{float(t.get('montant') or 0):,.2f} € | type={t.get('type_operation','')} | "
+                f"cat={t.get('categorie','?')} | {str(t.get('libelle',''))}"
                 for t in txns
             ]
             parts.append("Toutes les transactions :\n" + "\n".join(rows))

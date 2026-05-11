@@ -11,6 +11,8 @@ interface Transaction {
   montant: number;
   type_operation: string;
   libelle: string;
+  categorie?: string;
+  anomalie?: string | null;
   reference?: string;
 }
 interface Facture {
@@ -55,6 +57,8 @@ export interface ParsedData {
     total_debits: number;
     total_credits: number;
     types: Record<string, number>;
+    categories?: Record<string, number>;
+    anomalies?: string[];
     transactions: Transaction[];
   };
   xlsx?: {
@@ -81,6 +85,28 @@ const fmt = (n?: number | null) =>
 const TYPE_LABELS: Record<string, string> = {
   "05": "Vir. clients", "06": "Vir. ST", "08": "Prélèvements",
   "11": "Carte/NdF", "44": "International", "62": "Frais bancaires", "91": "Divers",
+};
+
+const CAT_LABELS: Record<string, string> = {
+  encaissement_client: "Encaissements clients",
+  paiement_st:         "Paiements ST",
+  prelevement:         "Prélèvements",
+  note_de_frais:       "Notes de frais",
+  international:       "International",
+  frais_bancaires:     "Frais bancaires",
+  divers:              "Divers",
+  inconnu:             "Non classifiés",
+};
+
+const CAT_COLORS: Record<string, string> = {
+  encaissement_client: "#34d399",
+  paiement_st:         "#f87171",
+  prelevement:         "#fb923c",
+  note_de_frais:       "#a78bfa",
+  international:       "#60a5fa",
+  frais_bancaires:     "#94a3b8",
+  divers:              "#64748b",
+  inconnu:             "#ef4444",
 };
 
 type Tab = "resume" | "transactions" | "factures" | "budget" | "tva";
@@ -248,6 +274,23 @@ function TabResume({ csv, xlsx }: { csv?: ParsedData["csv"]; xlsx?: ParsedData["
               </div>
             ))}
           </div>
+
+          {csv.categories && Object.keys(csv.categories).length > 0 && (
+            <>
+              <p className="text-[10px] uppercase tracking-wider font-semibold mt-3" style={{ color: "#4d7ab5" }}>
+                Classification Classeur
+              </p>
+              <div className="space-y-1">
+                {Object.entries(csv.categories).sort((a, b) => b[1] - a[1]).map(([cat, n]) => (
+                  <div key={cat} className="flex justify-between items-center px-2.5 py-1.5 rounded-lg text-[11px]"
+                    style={{ background: "rgba(12,21,38,0.8)", border: "1px solid rgba(26,42,68,0.7)" }}>
+                    <span style={{ color: CAT_COLORS[cat] ?? "#94a3b8" }}>● {CAT_LABELS[cat] ?? cat}</span>
+                    <span className="font-semibold" style={{ color: "#e2e8f0" }}>{n}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
 
@@ -284,7 +327,7 @@ function TabTransactions({ csv }: { csv?: ParsedData["csv"] }) {
     <div className="space-y-2">
       <p className="text-[10px]" style={{ color: "#475569" }}>{csv.transactions.length} transactions</p>
       <InspectorTable
-        headers={["Date", "Sens", "Montant", "Type", "Libellé"]}
+        headers={["Date", "Sens", "Montant", "Catégorie", "Libellé"]}
         rows={csv.transactions.map((t) => [
           <span key="d" style={{ color: "#64748b" }}>{t.date_operation}</span>,
           <span key="s" style={{ color: t.sens === "credit" ? "#34d399" : "#f87171" }}>
@@ -293,9 +336,11 @@ function TabTransactions({ csv }: { csv?: ParsedData["csv"] }) {
           <span key="m" className="font-medium" style={{ color: t.sens === "credit" ? "#34d399" : "#f87171" }}>
             {fmt(t.montant)}
           </span>,
-          <code key="t" style={{ color: "#60a5fa", fontSize: 10 }}>{t.type_operation}</code>,
-          <span key="l" style={{ color: "#94a3b8", maxWidth: 160, display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {String(t.libelle ?? "").slice(0, 45)}
+          <span key="c" style={{ color: CAT_COLORS[t.categorie ?? ""] ?? "#64748b", fontSize: 10, whiteSpace: "nowrap" }}>
+            {CAT_LABELS[t.categorie ?? ""] ?? t.categorie ?? "—"}
+          </span>,
+          <span key="l" style={{ color: "#94a3b8", maxWidth: 140, display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {String(t.libelle ?? "").slice(0, 40)}
           </span>,
         ])}
       />
