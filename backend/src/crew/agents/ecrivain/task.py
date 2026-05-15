@@ -5,14 +5,14 @@ from crewai import Agent, Task
 
 _CONFIG = yaml.safe_load(
     (Path(__file__).parents[3] / "crew" / "config" / "tasks.yaml").read_text(encoding="utf-8")
-)["classeur_task"]
+)["ecrivain_task"]
 
 
-def make_classeur_task(agent: Agent, transactions: list[dict]) -> Task:
-    transactions_json = json.dumps(transactions, ensure_ascii=False, default=str)
+def make_ecrivain_task(agent: Agent, matches: list[dict], xlsx_path: str, output_path: str) -> Task:
     description = _CONFIG["description"].format(
-        nb_transactions=len(transactions),
-        transactions_json=transactions_json,
+        xlsx_path=xlsx_path,
+        output_path=output_path,
+        matches_json=json.dumps(matches, ensure_ascii=False, default=str),
     )
     return Task(
         description=description,

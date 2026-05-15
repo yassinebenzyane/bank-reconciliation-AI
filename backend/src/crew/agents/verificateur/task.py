@@ -1,5 +1,11 @@
 import json
+import yaml
+from pathlib import Path
 from crewai import Agent, Task
+
+_CONFIG = yaml.safe_load(
+    (Path(__file__).parents[3] / "crew" / "config" / "tasks.yaml").read_text(encoding="utf-8")
+)["verificateur_task"]
 
 
 def make_verificateur_task(
@@ -12,38 +18,19 @@ def make_verificateur_task(
          "libelle": str(t.get("libelle", ""))[:60]}
         for i, t in enumerate(encaissements)
     ]
-    factures_json = json.dumps(
-        [{"id": f.get("id"), "client": str(f.get("client") or ""),
-          "montant_ttc": float(f.get("montant_ttc") or 0)}
-         for f in factures_ouvertes],
-        ensure_ascii=False,
+    description = _CONFIG["description"].format(
+        nb_encaissements=len(encaissements),
+        nb_factures=len(factures_ouvertes),
+        encaissements_json=json.dumps(enc_summary, ensure_ascii=False),
+        factures_json=json.dumps(
+            [{"id": f.get("id"), "client": str(f.get("client") or ""),
+              "montant_ttc": float(f.get("montant_ttc") or 0)}
+             for f in factures_ouvertes],
+            ensure_ascii=False,
+        ),
     )
-
     return Task(
-        description=(
-            f"Rapproche les {len(encaissements)} encaissements clients suivants "
-            f"avec les {len(factures_ouvertes)} factures ouvertes.\n\n"
-            f"Encaissements à traiter :\n{json.dumps(enc_summary, ensure_ascii=False)}\n\n"
-            f"Factures ouvertes :\n{factures_json}\n\n"
-            "Pour chaque encaissement :\n"
-            "1. Lis le libellé et identifie le nom du client payeur.\n"
-            "2. Appelle match_invoices_subset_sum avec le montant, "
-            "   les factures JSON ci-dessus, et le client_filter extrait du libellé.\n"
-            "3. Note le résultat : factures matchées, total, écart.\n\n"
-            "Retourne UNIQUEMENT un JSON array :\n"
-            "[{\"idx\": 0, \"client\": \"NOM\", \"montant\": 53346.0, "
-            "\"factures_ids\": [\"FC1183\", ...], \"total\": 53346.0, "
-            "\"ecart\": 0.0, \"statut\": \"match_exact\"}, ...]"
-        ),
-        expected_output=(
-            "JSON array, un objet par encaissement avec :\n"
-            "- idx : index de l'encaissement\n"
-            "- client : nom extrait du libellé\n"
-            "- montant : montant du virement\n"
-            "- factures_ids : liste des N° factures matchées ([] si pas de match)\n"
-            "- total : somme des factures matchées\n"
-            "- ecart : différence en euros\n"
-            "- statut : 'match_exact' | 'pas_de_match'"
-        ),
+        description=description,
+        expected_output=_CONFIG["expected_output"],
         agent=agent,
     )

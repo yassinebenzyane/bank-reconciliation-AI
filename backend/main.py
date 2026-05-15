@@ -634,6 +634,7 @@ async def _process_recon_stream(session: dict, session_id: str) -> AsyncGenerato
     yield _sse(
         f"\n---\n\n**Rapprochement terminé** : **{exact}/{total}** encaissement(s) rapproché(s).\n\n"
         + _format_recon_results(recon["results"])
+        + "\n\nTapez **Générer la matrice** pour écrire les résultats dans l'Excel."
     )
 
 
@@ -804,12 +805,39 @@ async def chat_stream(req: ChatRequest):
             yield _sse_done()
             return
 
-        # ── DONE → affichage direct ou Q&A ──────────────────────────
+        # ── DONE → génération matrice, affichage ou Q&A ─────────────
         if state == "done":
-            recon       = session.get("recon") or {}
-            is_display  = any(w in msg for w in ["afficher", "résultat", "rapport",
-                                                   "bilan", "montrer", "voir", "affiche",
-                                                   "resultat", "tableau"])
+            recon      = session.get("recon") or {}
+            is_export  = any(w in msg for w in ["générer", "generer", "matrice", "excel",
+                                                  "écrire", "ecrire", "exporter", "export"])
+            is_display = any(w in msg for w in ["afficher", "résultat", "rapport",
+                                                  "bilan", "montrer", "voir", "resultat"])
+
+            if is_export and recon.get("results"):
+                yield _sse("Génération de la matrice mise à jour en cours...\n\n")
+                await asyncio.sleep(0.1)
+                try:
+                    from src.crew.agents.ecrivain.main import run as ecrivain_run
+                    xlsx_path   = session.get("xlsx")
+                    output_path = str(Path(xlsx_path).parent / ("MATRICE_RAPPROCHEE_" + Path(xlsx_path).name))
+                    loop        = asyncio.get_event_loop()
+                    result      = await loop.run_in_executor(
+                        None, ecrivain_run, recon["results"], xlsx_path, output_path
+                    )
+                    sessions[req.session_id]["export_path"]   = output_path
+                    sessions[req.session_id]["export_result"] = result
+                    nb = result.get("updated", 0)
+                    async for chunk in _stream_text(
+                        f"✅ **{nb} ligne(s)** mises à jour dans la matrice Excel.\n\n"
+                        f"Téléchargez le fichier via : `POST /api/session/{req.session_id}/export`"
+                    ):
+                        yield chunk
+                except Exception as e:
+                    async for chunk in _stream_text(f"Erreur lors de la génération : {e}"):
+                        yield chunk
+                yield _sse_done()
+                return
+
             if is_display and recon.get("results"):
                 async for chunk in _stream_text(_format_recon_results(recon["results"])):
                     yield chunk
@@ -840,6 +868,42 @@ async def chat_stream(req: ChatRequest):
         generate(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/session/{session_id}/export")
+async def export_matrix(session_id: str):
+    """Lance l'Agent Écrivain : écrit les résultats du rapprochement dans la matrice Excel."""
+    from fastapi.responses import FileResponse
+    from src.crew.agents.ecrivain.main import run as ecrivain_run
+
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session introuvable.")
+    if session.get("state") not in ("done", "reconciling"):
+        raise HTTPException(status_code=400, detail="Rapprochement non terminé.")
+
+    recon = session.get("recon")
+    if not recon or not recon.get("results"):
+        raise HTTPException(status_code=400, detail="Aucun résultat de rapprochement.")
+
+    xlsx_path   = session.get("xlsx")
+    output_path = str(Path(xlsx_path).parent / ("MATRICE_RAPPROCHEE_" + Path(xlsx_path).name))
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, ecrivain_run, recon["results"], xlsx_path, output_path
+    )
+
+    if not Path(output_path).exists():
+        raise HTTPException(status_code=500, detail="Échec de la génération du fichier.")
+
+    sessions[session_id]["export_path"]   = output_path
+    sessions[session_id]["export_result"] = result
+    return FileResponse(
+        path=output_path,
+        filename=Path(output_path).name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 

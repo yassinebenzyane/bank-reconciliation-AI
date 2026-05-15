@@ -1,0 +1,90 @@
+lecteur_task:
+  description: >
+    Ingère les fichiers financiers ECO Steering :
+    - Relevé bancaire : {csv_path}
+    - Matrice Excel   : {xlsx_path}
+
+    Étapes :
+    1. Appelle parse_csv_bancaire avec path='{csv_path}'
+    2. Appelle parse_excel_matrice avec path='{xlsx_path}'
+    3. Confirme le nombre de transactions CSV et le nombre de lignes par onglet Excel.
+  expected_output: >
+    Un rapport de parsing avec pour chaque source :
+    - Nombre de lignes extraites par onglet
+    - Anomalies détectées (lignes vides, types inconnus, etc.)
+    - Confirmation que le parsing s'est terminé sans erreur critique
+  agent: lecteur
+
+classeur_task:
+  description: >
+    Classifie les {nb_transactions} transactions bancaires ci-dessous.
+
+    Appelle l'outil classify_transactions avec ce JSON exact :
+    {transactions_json}
+
+    Après l'appel à l'outil, examine les transactions avec categorie='inconnu'.
+    Pour chacune, analyse le libellé et remplace 'inconnu' par la catégorie
+    la plus probable parmi : encaissement_client, paiement_st, prelevement,
+    note_de_frais, international, frais_bancaires, divers.
+    Si tu ne peux pas déterminer la catégorie, laisse 'inconnu'.
+
+    Retourne UNIQUEMENT le JSON array final, sans texte autour.
+  expected_output: >
+    Un JSON array de transactions, chacune enrichie avec :
+    - categorie : encaissement_client | paiement_st | prelevement |
+      note_de_frais | international | frais_bancaires | divers | inconnu
+    - anomalie : string décrivant l'anomalie détectée, ou null
+  agent: classeur
+
+verificateur_task:
+  description: >
+    Rapproche les {nb_encaissements} encaissements clients suivants
+    avec les {nb_factures} factures ouvertes.
+
+    Encaissements à traiter :
+    {encaissements_json}
+
+    Factures ouvertes :
+    {factures_json}
+
+    Pour chaque encaissement :
+    1. Lis le libellé et identifie le nom du client payeur.
+    2. Appelle match_invoices_subset_sum avec le montant,
+       les factures JSON ci-dessus, et le client_filter extrait du libellé.
+    3. Note le résultat : factures matchées, total, écart.
+
+    Retourne UNIQUEMENT un JSON array :
+    [{"idx": 0, "client": "NOM", "montant": 53346.0,
+      "factures_ids": ["FC1183", ...], "total": 53346.0,
+      "ecart": 0.0, "statut": "match_exact"}, ...]
+  expected_output: >
+    JSON array, un objet par encaissement avec :
+    - idx : index de l'encaissement
+    - client : nom extrait du libellé
+    - montant : montant du virement
+    - factures_ids : liste des N° factures matchées ([] si pas de match)
+    - total : somme des factures matchées
+    - ecart : différence en euros
+    - statut : 'match_exact' | 'ambigu' | 'pas_de_match'
+  agent: verificateur
+
+ecrivain_task:
+  description: >
+    Écris les résultats du rapprochement dans la matrice Excel ECO Steering.
+
+    Fichier source  : {xlsx_path}
+    Fichier sortie  : {output_path}
+
+    Appelle l'outil update_base_client avec :
+    - matches_json : {matches_json}
+    - xlsx_path    : {xlsx_path}
+    - output_path  : {output_path}
+
+    Ne modifie que les factures présentes dans matches_json avec statut 'match_exact'.
+    Ne touche jamais aux autres lignes ni aux autres colonnes.
+  expected_output: >
+    Un JSON confirmant le nombre de lignes mises à jour dans Base CLient,
+    le chemin du fichier généré, et la liste des éventuelles lignes ignorées.
+    Exemple : {"updated": 26, "skipped": [], "output": "...xlsx",
+    "message": "26 ligne(s) mises à jour dans Base CLient."}
+  agent: ecrivain
