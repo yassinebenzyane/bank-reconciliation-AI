@@ -180,14 +180,6 @@ def _run_parse(csv_path: str | None, xlsx_path: str | None) -> dict:
             "budget_treso":    budget_flat,
         }
 
-    # Rapprochement encaissements ↔ factures ouvertes
-    if csv_path and xlsx_path:
-        from src.crew.agents.verificateur.main import run as verificateur_run
-        encaissements = [t for t in txns if t.get("categorie") == "encaissement_client"]
-        factures_ouvertes = result.get("xlsx", {}).get("factures", [])
-        if encaissements and factures_ouvertes:
-            result["matches"] = verificateur_run(encaissements, factures_ouvertes)
-
     return result
 
 
@@ -351,37 +343,12 @@ def _format_parse_report(parsed: dict) -> str:
                 f"| **Tréso fin** | **{budget_mois.get('tresorerie_fin') or 0:,.2f} €** | — |",
             ]
 
-    matches = parsed.get("matches", [])
-    if matches:
-        exact   = [m for m in matches if m.get("statut") == "match_exact"]
-        no_match = [m for m in matches if m.get("statut") == "pas_de_match"]
-        lines += [
-            "",
-            "---",
-            "",
-            "## Rapprochement",
-            "",
-            f"**{len(exact)}/{len(matches)} encaissements rapprochés**",
-        ]
-        for m in exact:
-            ids = ", ".join(str(f) for f in m.get("factures_ids", []))
-            lines.append(
-                f"- ✅ **{m.get('client', '?')}** — "
-                f"{float(m.get('montant', 0)):,.2f} € → {ids} "
-                f"(écart {float(m.get('ecart', 0)):.2f} €)"
-            )
-        for m in no_match:
-            lines.append(
-                f"- ❌ **{m.get('client', '?')}** — "
-                f"{float(m.get('montant', 0)):,.2f} € → aucune combinaison trouvée"
-            )
-
     if "csv" in parsed and "xlsx" in parsed:
         lines += [
             "",
             "---",
             "",
-            "Ingestion terminée. Posez une question sur les données ou tapez **Lancer le rapprochement**.",
+            "Lecture terminée. Posez une question sur les données, ou tapez **Lancer le rapprochement** quand vous êtes prêt.",
         ]
 
     return "\n".join(lines)
@@ -516,10 +483,12 @@ async def upload_files(
         xlsx_name = xlsx_file.filename
 
     sessions[session_id] = {
+        "state":   "has_files" if (csv_name and xlsx_name) else "waiting_files",
         "csv":     str(session_dir / csv_name)  if csv_name  else None,
         "xlsx":    str(session_dir / xlsx_name) if xlsx_name else None,
         "parsed":  None,
         "history": [],
+        "recon":   None,
     }
 
     parts = []
@@ -534,80 +503,320 @@ async def upload_files(
     )
 
 
+_WELCOME = (
+    "Bonjour ! Je suis votre assistant de rapprochement bancaire ECO Steering.\n\n"
+    "Pour commencer, déposez les deux fichiers :\n\n"
+    "1. **Relevé bancaire** — fichier `.csv` (export CIH/AWB)\n"
+    "2. **Matrice Excel** — fichier `.xlsx` (matrice ECO Steering)\n\n"
+    "Utilisez le bouton **Importer des fichiers** ci-dessus."
+)
+
+
+def _init_recon(parsed: dict) -> dict:
+    """Initialise le contexte de rapprochement : extraction clients (LLM) + index."""
+    from src.crew.agents.verificateur.main import extract_clients
+    from src.tools.matching import normalize_client
+
+    txns          = parsed.get("csv", {}).get("transactions", [])
+    encaissements = [t for t in txns if t.get("categorie") == "encaissement_client"]
+    factures      = parsed.get("xlsx", {}).get("factures", [])
+
+    raw_names    = extract_clients(encaissements) if encaissements else {}
+    client_names = {k: normalize_client(v) for k, v in raw_names.items()}
+
+    return {
+        "encaissements":   encaissements,
+        "factures_ouvertes": factures,
+        "client_names":    client_names,
+        "results":         [],
+        "matched_ids":     [],
+        "next_idx":        0,
+        "pending_idx":     None,
+        "pending_options": [],
+    }
+
+
+def _format_recon_results(results: list[dict]) -> str:
+    """Formate les résultats du rapprochement en tableau Markdown."""
+    if not results:
+        return "Aucun résultat à afficher."
+
+    lines = [
+        "## Résultats du rapprochement\n",
+        "| Client | Montant virement | Factures | Total factures | Écart | Statut |",
+        "|--------|-----------------|----------|----------------|-------|--------|",
+    ]
+    for r in results:
+        client  = str(r.get("client") or "?")[:25]
+        montant = float(r.get("montant") or 0)
+        ids     = ", ".join(str(f) for f in r.get("factures_ids") or []) or "—"
+        total   = float(r.get("total") or 0)
+        ecart   = float(r.get("ecart") or 0)
+        statut  = "✅ Rapproché" if r.get("statut") == "match_exact" else "❌ Non rapproché"
+        lines.append(f"| {client} | {montant:,.2f} € | {ids} | {total:,.2f} € | {ecart:.2f} € | {statut} |")
+
+    exact        = sum(1 for r in results if r.get("statut") == "match_exact")
+    total_enc    = sum(float(r.get("montant") or 0) for r in results if r.get("statut") == "match_exact")
+    non_rapproch = [r for r in results if r.get("statut") != "match_exact"]
+
+    lines += [
+        "",
+        f"**{exact}/{len(results)} encaissements rapprochés** — Total : **{total_enc:,.2f} €**",
+    ]
+    if non_rapproch:
+        lines += ["", "**Non rapprochés :**"]
+        for r in non_rapproch:
+            lines.append(f"- {r.get('client','?')} — {float(r.get('montant') or 0):,.2f} €")
+
+    return "\n".join(lines)
+
+
+async def _process_recon_stream(session: dict, session_id: str) -> AsyncGenerator[str, None]:
+    """Traite les encaissements un par un et génère les messages SSE.
+
+    S'arrête dès qu'un cas ambigu est détecté (attend la réponse du comptable).
+    """
+    from src.crew.agents.verificateur.main import run_one
+
+    recon         = session["recon"]
+    encaissements = recon["encaissements"]
+    factures      = recon["factures_ouvertes"]
+    client_names  = recon["client_names"]
+    matched_ids   = set(recon["matched_ids"])
+
+    while recon["next_idx"] < len(encaissements):
+        idx       = recon["next_idx"]
+        txn       = encaissements[idx]
+        client    = client_names.get(idx, str(txn.get("libelle", ""))[:20])
+        remaining = [f for f in factures if str(f.get("id") or "") not in matched_ids]
+
+        result = run_one(txn, remaining, client)
+        amount = result["montant"]
+
+        if result["statut"] == "match_exact":
+            matched_ids |= {str(fid) for fid in result["factures_ids"]}
+            recon["results"].append({**result, "idx": idx, "transaction": txn})
+            recon["matched_ids"] = list(matched_ids)
+            recon["next_idx"]    = idx + 1
+            sessions[session_id]["recon"] = recon
+            ids = ", ".join(str(f) for f in result["factures_ids"])
+            yield _sse(f"✅ **{client}** — {amount:,.2f} € → {ids} (écart {result['ecart']:.2f} €)\n\n")
+
+        elif result["statut"] == "ambigu":
+            recon["pending_idx"]     = idx
+            recon["pending_options"] = result["options"]
+            sessions[session_id]["recon"] = recon
+            # Texte descriptif
+            lines = [f"⚠️ **{client}** — {amount:,.2f} € : j'ai trouvé **{len(result['options'])} combinaisons** possibles :\n\n"]
+            for i, opt in enumerate(result["options"]):
+                letter = chr(65 + i)
+                ids    = ", ".join(str(f) for f in opt["factures_ids"])
+                lines.append(f"**Option {letter}** : {ids} → {opt['total']:,.2f} € (écart {opt['ecart']:.2f} €)\n\n")
+            yield _sse("".join(lines))
+            # Événement choices pour afficher les boutons dans le frontend
+            choices = [
+                {"label": chr(65 + i), "text": f"{', '.join(str(f) for f in opt['factures_ids'])} — {opt['total']:,.2f} €"}
+                for i, opt in enumerate(result["options"])
+            ]
+            yield f"data: {json.dumps({'choices': choices}, ensure_ascii=False)}\n\n"
+            return  # pause — attend la réponse du comptable
+
+        else:  # pas_de_match
+            recon["results"].append({**result, "idx": idx, "transaction": txn})
+            recon["next_idx"] = idx + 1
+            sessions[session_id]["recon"] = recon
+            yield _sse(f"❌ **{client}** — {amount:,.2f} € → aucune combinaison trouvée\n\n")
+
+    # Tous les encaissements traités
+    sessions[session_id]["state"] = "done"
+    exact = sum(1 for r in recon["results"] if r["statut"] == "match_exact")
+    total = len(recon["results"])
+    yield _sse(
+        f"\n---\n\n**Rapprochement terminé** : **{exact}/{total}** encaissement(s) rapproché(s).\n\n"
+        + _format_recon_results(recon["results"])
+    )
+
+
+def _parse_choice(message: str, n_options: int) -> int:
+    """Interprète la réponse du comptable (A/B/1/2) → index 0-based."""
+    msg = message.strip().upper()
+    for i in range(n_options):
+        if chr(65 + i) in msg:
+            return i
+    for i in range(1, n_options + 1):
+        if str(i) in msg:
+            return i - 1
+    return 0
+
+
+def _record_choice(recon: dict, choice_idx: int) -> dict:
+    """Enregistre le choix du comptable et avance l'index."""
+    idx     = recon["pending_idx"]
+    options = recon["pending_options"]
+    chosen  = options[min(choice_idx, len(options) - 1)]
+
+    matched_ids = set(recon["matched_ids"])
+    matched_ids |= {str(fid) for fid in chosen["factures_ids"]}
+
+    txn    = recon["encaissements"][idx]
+    client = recon["client_names"].get(idx, "?")
+
+    recon["results"].append({
+        "idx":         idx,
+        "transaction": txn,
+        "client":      client,
+        "montant":     float(txn.get("montant") or 0),
+        "factures_ids": chosen["factures_ids"],
+        "total":       chosen["total"],
+        "ecart":       chosen["ecart"],
+        "statut":      "match_exact",
+    })
+    recon["matched_ids"]     = list(matched_ids)
+    recon["next_idx"]        = idx + 1
+    recon["pending_idx"]     = None
+    recon["pending_options"] = []
+    return recon
+
+
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest):
     async def generate() -> AsyncGenerator[str, None]:
-        session = sessions.get(req.session_id or "", {})
+        session = sessions.get(req.session_id or "")
+        if session is None:
+            async for chunk in _stream_text(_WELCOME):
+                yield chunk
+            yield _sse_done()
+            return
+
+        state     = session.get("state", "waiting_files")
         csv_path  = session.get("csv")
         xlsx_path = session.get("xlsx")
-        csv_ok    = bool(csv_path)
-        xlsx_ok   = bool(xlsx_path)
         msg       = req.message.lower().strip()
 
-        if not csv_ok and not xlsx_ok:
-            async for chunk in _stream_text(
-                "Pour démarrer un rapprochement, j'ai besoin de deux fichiers :\n\n"
-                "1. **Relevé bancaire** — fichier `.csv` (export CIH/AWB)\n"
-                "2. **Matrice Excel** — fichier `.xlsx` (matrice ECO Steering)\n\n"
-                "Utilisez le bouton **Importer des fichiers** pour les déposer."
-            ):
+        # ── WAITING FILES ─────────────────────────────────────────────
+        if state == "waiting_files":
+            if csv_path and not xlsx_path:
+                text = "✅ Relevé bancaire reçu.\n\nIl me manque encore la **matrice Excel** (`.xlsx`). Déposez-la pour continuer."
+            elif xlsx_path and not csv_path:
+                text = "✅ Matrice Excel reçue.\n\nIl me manque encore le **relevé bancaire** (`.csv`). Déposez-le pour continuer."
+            else:
+                text = _WELCOME
+            async for chunk in _stream_text(text):
                 yield chunk
             yield _sse_done()
             return
 
-        if csv_ok and not xlsx_ok:
-            async for chunk in _stream_text(
-                "✅ Relevé bancaire reçu.\n\n"
-                "Il me manque encore la **matrice Excel** (`.xlsx`). Déposez-la pour continuer."
-            ):
-                yield chunk
-            yield _sse_done()
-            return
-
-        if not csv_ok and xlsx_ok:
-            async for chunk in _stream_text(
-                "✅ Matrice Excel reçue.\n\n"
-                "Il me manque encore le **relevé bancaire** (`.csv`). Déposez-le pour continuer."
-            ):
-                yield chunk
-            yield _sse_done()
-            return
-
-        lance = any(w in msg for w in ["lancer", "démarrer", "parser", "analyser",
-                                        "start", "rapprochement", "csv", "excel",
-                                        "déposer", "fichier"])
-        already_parsed = session.get("parsed") is not None
-
-        if lance and not already_parsed:
-            yield _sse("Parsing en cours...\n\n")
+        # ── HAS FILES → parsing automatique au premier message ────────
+        if state == "has_files":
+            yield _sse("Les fichiers sont là. Je lance la lecture et la classification...\n\n")
             await asyncio.sleep(0.1)
             try:
-                loop = asyncio.get_event_loop()
+                loop       = asyncio.get_event_loop()
                 parse_task = loop.run_in_executor(None, _run_parse, csv_path, xlsx_path)
-                steps = [
-                    "Echantillonnage des fichiers",
-                    "GPT-4o analyse la structure",
-                    "Generation du code de parsing",
-                    "Execution et validation",
-                    "Correction automatique",
-                ]
-                step_idx = 0
+                steps      = ["Lecture du CSV bancaire", "Lecture de la matrice Excel",
+                              "Classification des transactions", "Validation des données"]
+                step_idx   = 0
                 while True:
                     try:
                         parsed = await asyncio.wait_for(asyncio.shield(parse_task), timeout=3.0)
                         break
                     except asyncio.TimeoutError:
-                        yield _sse_progress(steps[min(step_idx, len(steps)-1)])
+                        yield _sse_progress(steps[min(step_idx, len(steps) - 1)])
                         step_idx += 1
                 sessions[req.session_id]["parsed"] = parsed
+                sessions[req.session_id]["state"]  = "parsed"
                 async for chunk in _stream_text(_format_parse_report(parsed)):
                     yield chunk
             except Exception as e:
-                async for chunk in _stream_text(f"Erreur de parsing : {e}"):
+                async for chunk in _stream_text(f"Erreur de lecture : {e}"):
                     yield chunk
+            yield _sse_done()
+            return
 
-        elif already_parsed and not lance:
-            yield _sse_progress("Analyse des données...")
+        # ── PARSED → Q&A ou déclenchement du rapprochement ───────────
+        if state == "parsed":
+            is_launch = any(w in msg for w in ["rapprochement", "lancer", "démarrer", "commencer", "start"])
+            if is_launch:
+                yield _sse("Lancement du rapprochement...\n\n")
+                await asyncio.sleep(0.1)
+                try:
+                    loop  = asyncio.get_event_loop()
+                    recon = await loop.run_in_executor(None, _init_recon, session["parsed"])
+                    sessions[req.session_id]["recon"] = recon
+                    sessions[req.session_id]["state"] = "reconciling"
+                    if not recon["encaissements"]:
+                        async for chunk in _stream_text(
+                            "Aucun encaissement client (type `05`) trouvé dans le relevé."
+                        ):
+                            yield chunk
+                        yield _sse_done()
+                        return
+                    yield _sse(
+                        f"**{len(recon['encaissements'])} encaissement(s)** à rapprocher "
+                        f"avec **{len(recon['factures_ouvertes'])} facture(s)** ouvertes.\n\n---\n\n"
+                    )
+                    async for chunk in _process_recon_stream(sessions[req.session_id], req.session_id):
+                        yield chunk
+                except Exception as e:
+                    async for chunk in _stream_text(f"Erreur : {e}"):
+                        yield chunk
+            else:
+                yield _sse_progress("Analyse des données...")
+                await asyncio.sleep(0.05)
+                try:
+                    history = session.get("history", [])
+                    loop    = asyncio.get_event_loop()
+                    answer  = await loop.run_in_executor(
+                        None, _qa_sync, req.message.strip(), session["parsed"], history
+                    )
+                    sessions[req.session_id]["history"] = history + [
+                        {"role": "user",      "content": req.message.strip()},
+                        {"role": "assistant", "content": answer},
+                    ]
+                    async for chunk in _stream_text(answer):
+                        yield chunk
+                except Exception as e:
+                    async for chunk in _stream_text(f"Erreur : {e}"):
+                        yield chunk
+            yield _sse_done()
+            return
+
+        # ── RECONCILING → réponse du comptable ou suite ───────────────
+        if state == "reconciling":
+            recon = session.get("recon", {})
+            if recon.get("pending_idx") is not None:
+                n_opts = len(recon.get("pending_options", []))
+                choice = _parse_choice(req.message, n_opts)
+                chosen = recon["pending_options"][choice]
+                letter = chr(65 + choice)
+                yield _sse(
+                    f"✅ Option **{letter}** retenue : "
+                    f"{', '.join(str(f) for f in chosen['factures_ids'])} "
+                    f"({chosen['total']:,.2f} €)\n\n"
+                )
+                sessions[req.session_id]["recon"] = _record_choice(recon, choice)
+            try:
+                async for chunk in _process_recon_stream(sessions[req.session_id], req.session_id):
+                    yield chunk
+            except Exception as e:
+                async for chunk in _stream_text(f"Erreur : {e}"):
+                    yield chunk
+            yield _sse_done()
+            return
+
+        # ── DONE → affichage direct ou Q&A ──────────────────────────
+        if state == "done":
+            recon       = session.get("recon") or {}
+            is_display  = any(w in msg for w in ["afficher", "résultat", "rapport",
+                                                   "bilan", "montrer", "voir", "affiche",
+                                                   "resultat", "tableau"])
+            if is_display and recon.get("results"):
+                async for chunk in _stream_text(_format_recon_results(recon["results"])):
+                    yield chunk
+                yield _sse_done()
+                return
+
+            yield _sse_progress("Analyse des résultats...")
             await asyncio.sleep(0.05)
             try:
                 history = session.get("history", [])
@@ -624,23 +833,8 @@ async def chat_stream(req: ChatRequest):
             except Exception as e:
                 async for chunk in _stream_text(f"Erreur : {e}"):
                     yield chunk
-
-        elif lance and already_parsed:
-            async for chunk in _stream_text(
-                "Les données sont déjà parsées. "
-                "Posez une question sur les transactions ou les factures, "
-                "ou tapez **Réinitialiser** pour recommencer."
-            ):
-                yield chunk
-
-        else:
-            async for chunk in _stream_text(
-                "Les deux fichiers sont prêts.\n\n"
-                "Tapez **Lancer le parsing** pour démarrer l'ingestion."
-            ):
-                yield chunk
-
-        yield _sse_done()
+            yield _sse_done()
+            return
 
     return StreamingResponse(
         generate(),

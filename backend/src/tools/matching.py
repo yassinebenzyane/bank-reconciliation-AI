@@ -87,6 +87,54 @@ def match_invoices_combination(
     return None
 
 
+def find_all_combinations(
+    amount: float | Decimal,
+    open_invoices: list[dict],
+    tolerance: float = 1.0,
+    client_filter: str | None = None,
+    max_results: int = 5,
+) -> list[dict]:
+    """Retourne jusqu'à max_results combinaisons valides (montant ± tolérance).
+
+    Utilisé pour détecter les cas ambigus avant de soumettre au comptable.
+    Limité aux sets ≤ 20 factures (exhaustif — suffisant par client en pratique).
+    """
+    target = float(amount)
+
+    candidates = open_invoices
+    if client_filter:
+        normalized = normalize_client(client_filter)
+        filtered = [inv for inv in open_invoices
+                    if _client_matches(normalized, str(inv.get("client") or ""))]
+        if filtered:
+            candidates = filtered
+
+    target_cents    = round(target * 100)
+    tolerance_cents = round(tolerance * 100)
+    amounts_cents   = [round(float(inv.get("montant_ttc") or 0) * 100) for inv in candidates]
+    n = len(amounts_cents)
+
+    if n == 0:
+        return []
+
+    results: list[dict] = []
+    for size in range(1, min(n + 1, 21)):
+        for combo in combinations(range(n), size):
+            total_c = sum(amounts_cents[i] for i in combo)
+            if abs(total_c - target_cents) <= tolerance_cents:
+                matched = [candidates[i] for i in combo]
+                total   = sum(float(inv.get("montant_ttc") or 0) for inv in matched)
+                results.append({
+                    "factures": matched,
+                    "total":    round(total, 2),
+                    "ecart":    round(abs(total - target), 2),
+                    "nb":       len(matched),
+                })
+                if len(results) >= max_results:
+                    return results
+    return results
+
+
 def _find_combination(target: float, invoices: list[dict], tolerance: float) -> dict | None:
     """Cherche la combinaison de factures dont la somme ≈ target (±tolerance).
 

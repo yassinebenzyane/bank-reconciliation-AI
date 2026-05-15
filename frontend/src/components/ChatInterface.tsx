@@ -7,7 +7,7 @@ import { WelcomeScreen } from "./WelcomeScreen";
 import { FileUploadZone } from "./FileUploadZone";
 import { uploadFiles, streamChat } from "@/lib/api";
 import { generateId } from "@/lib/utils";
-import type { Message, SessionState, UploadedFile } from "@/lib/types";
+import type { Message, SessionState, UploadedFile, ChoiceOption } from "@/lib/types";
 
 interface ChatInterfaceProps {
   backendOnline: boolean;
@@ -31,6 +31,7 @@ export function ChatInterface({ backendOnline, onParsed }: ChatInterfaceProps) {
   const [pendingXlsx, setPendingXlsx] = useState<File | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [isParsed, setIsParsed] = useState(false);
+  const [pendingChoices, setPendingChoices] = useState<ChoiceOption[] | null>(null);
 
   const [session, setSession] = useState<SessionState>({
     sessionId: null,
@@ -84,6 +85,11 @@ export function ChatInterface({ backendOnline, onParsed }: ChatInterfaceProps) {
     } finally {
       setIsStreaming(false);
     }
+  };
+
+  const handleChoiceClick = (choice: ChoiceOption) => {
+    setPendingChoices(null);
+    handleSend(choice.label);
   };
 
   const handleUpload = useCallback(async () => {
@@ -140,7 +146,8 @@ export function ChatInterface({ backendOnline, onParsed }: ChatInterfaceProps) {
     let accumulated = "";
 
     try {
-      const gen = streamChat(text, session.sessionId, session.csvFile?.name, session.xlsxFile?.name);
+      setPendingChoices(null);
+      const gen = streamChat(text, session.sessionId, session.csvFile?.name, session.xlsxFile?.name, setPendingChoices);
       for await (const delta of gen) {
         accumulated += delta;
         updateMessage(assistantId, accumulated, true);
@@ -262,7 +269,31 @@ export function ChatInterface({ backendOnline, onParsed }: ChatInterfaceProps) {
               <MessageBubble key={msg.id} message={msg} />
             ))}
 
-            {isParsed && !isStreaming && (
+            {pendingChoices && !isStreaming && (
+              <div className="animate-fade-in px-1">
+                <p className="text-xs text-amber-400 mb-2 font-medium">Choisissez une option :</p>
+                <div className="flex flex-col gap-2">
+                  {pendingChoices.map((opt) => (
+                    <button
+                      key={opt.label}
+                      onClick={() => handleChoiceClick(opt)}
+                      className="flex items-center gap-3 px-4 py-2.5 rounded-xl text-left text-sm
+                                 border border-amber-500/30 bg-amber-500/5 text-amber-100
+                                 hover:border-amber-400/60 hover:bg-amber-500/15
+                                 transition-all duration-150"
+                    >
+                      <span className="shrink-0 w-6 h-6 rounded-full bg-amber-500/20 border border-amber-500/40
+                                       flex items-center justify-center text-xs font-bold text-amber-300">
+                        {opt.label}
+                      </span>
+                      <span>{opt.text}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {isParsed && !isStreaming && !pendingChoices && (
               <div className="pt-1">
                 <div className="flex items-center gap-1.5 mb-2 text-xs text-slate-500">
                   <Sparkles size={11} />
@@ -285,7 +316,7 @@ export function ChatInterface({ backendOnline, onParsed }: ChatInterfaceProps) {
               </div>
             )}
 
-            {session.isReady && !isParsed && !isStreaming && (
+            {session.isReady && !isParsed && !isStreaming && !pendingChoices && (
               <div className="flex justify-center pt-2">
                 <button
                   onClick={() => handleQuickSend("Lancer le parsing")}

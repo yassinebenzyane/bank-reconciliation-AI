@@ -1,11 +1,17 @@
 export type MessageRole = "user" | "assistant" | "system";
 
+export interface ChoiceOption {
+  label: string;  // "A", "B", ...
+  text: string;   // "FC1183, FC1184 → 53 346,00 €"
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
   content: string;
   timestamp: Date;
   isStreaming?: boolean;
+  choices?: ChoiceOption[];
 }
 
 export interface UploadedFile {

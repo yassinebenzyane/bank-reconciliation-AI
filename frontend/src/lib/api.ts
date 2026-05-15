@@ -23,11 +23,14 @@ export async function uploadFiles(
   return res.json();
 }
 
+import type { ChoiceOption } from "./types";
+
 export async function* streamChat(
   message: string,
   sessionId: string | null,
   csvFilename?: string | null,
   xlsxFilename?: string | null,
+  onChoices?: (options: ChoiceOption[]) => void,
 ): AsyncGenerator<string> {
   const res = await fetch(`${BASE}/api/chat/stream`, {
     method: "POST",
@@ -61,6 +64,7 @@ export async function* streamChat(
       try {
         const parsed = JSON.parse(json);
         if (parsed.done) return;
+        if (parsed.choices) { onChoices?.(parsed.choices); return; }
         if (parsed.delta) yield parsed.delta;
       } catch {
         // ignore malformed chunks

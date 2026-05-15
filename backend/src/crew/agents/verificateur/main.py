@@ -10,6 +10,58 @@ from .task import make_verificateur_task
 log = logging.getLogger(__name__)
 
 
+def extract_clients(encaissements: list[dict]) -> dict[int, str]:
+    """Extrait les noms clients depuis les libellés (un seul appel LLM batch)."""
+    return _extract_clients_batch(encaissements)
+
+
+def run_one(txn: dict, factures_remaining: list[dict], client_name: str) -> dict:
+    """Rapproche un encaissement. Retourne statut: match_exact | ambigu | pas_de_match.
+
+    match_exact  → une seule combinaison trouvée, factures_ids rempli
+    ambigu       → plusieurs combinaisons possibles, options[] rempli pour demander au comptable
+    pas_de_match → aucune combinaison
+    """
+    from src.tools.matching import find_all_combinations
+
+    amount      = float(txn.get("montant") or 0)
+    all_matches = find_all_combinations(amount, factures_remaining, client_filter=client_name)
+
+    if not all_matches:
+        return {
+            "statut":      "pas_de_match",
+            "client":      client_name,
+            "montant":     amount,
+            "factures_ids": [],
+            "total":       0.0,
+            "ecart":       amount,
+            "options":     [],
+        }
+    if len(all_matches) == 1:
+        m = all_matches[0]
+        return {
+            "statut":      "match_exact",
+            "client":      client_name,
+            "montant":     amount,
+            "factures_ids": [f.get("id") for f in m["factures"]],
+            "total":       m["total"],
+            "ecart":       m["ecart"],
+            "options":     [],
+        }
+    return {
+        "statut":      "ambigu",
+        "client":      client_name,
+        "montant":     amount,
+        "factures_ids": [],
+        "total":       0.0,
+        "ecart":       0.0,
+        "options": [
+            {"factures_ids": [f.get("id") for f in m["factures"]], "total": m["total"], "ecart": m["ecart"]}
+            for m in all_matches
+        ],
+    }
+
+
 def run(encaissements: list[dict], factures_ouvertes: list[dict]) -> list[dict]:
     """Rapproche chaque encaissement client avec les factures ouvertes.
 
