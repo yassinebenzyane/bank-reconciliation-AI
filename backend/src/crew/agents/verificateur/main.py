@@ -56,7 +56,12 @@ def run_one(txn: dict, factures_remaining: list[dict], client_name: str) -> dict
         "total":       0.0,
         "ecart":       0.0,
         "options": [
-            {"factures_ids": [f.get("id") for f in m["factures"]], "total": m["total"], "ecart": m["ecart"]}
+            {
+                "factures_ids": [f.get("id") for f in m["factures"]],
+                "factures":     m["factures"],
+                "total":        m["total"],
+                "ecart":        m["ecart"],
+            }
             for m in all_matches
         ],
     }

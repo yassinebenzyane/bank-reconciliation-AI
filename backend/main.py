@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -158,9 +158,19 @@ def _run_parse(csv_path: str | None, xlsx_path: str | None) -> dict:
             "total_ouvert":    sum(float(r.get("montant_ttc") or 0) for r in ouvertes),
             "clients":         clients,
             "factures": [
-                {"id": r.get("n_facture"), "client": r.get("client"),
-                 "montant_ttc": float(r.get("montant_ttc") or 0),
-                 "date_echeance": str(r.get("echeance_previsionnelle") or "")}
+                {
+                    "id":                    r.get("n_facture"),
+                    "client":                str(r.get("client")               or ""),
+                    "montant_ttc":           float(r.get("montant_ttc")        or 0),
+                    "date_echeance":         str(r.get("echeance_previsionnelle") or ""),
+                    "n_facture":             str(r.get("n_facture")            or ""),
+                    "date_facturation":      str(r.get("date_facturation")     or ""),
+                    "mois_facturation":      str(r.get("mois_facturation")     or ""),
+                    "projet":                str(r.get("projet")               or ""),
+                    "sous_traitant_affecte": str(r.get("sous_traitant_affecte") or ""),
+                    "mois_prestation":       str(r.get("mois_prestation")      or ""),
+                    "n_contrat":             str(r.get("n_contrat")            or ""),
+                }
                 for r in ouvertes
             ],
             "nb_st_ouverts":   len(st_ouverts),
@@ -610,15 +620,34 @@ async def _process_recon_stream(session: dict, session_id: str) -> AsyncGenerato
             lines = [f"⚠️ **{client}** — {amount:,.2f} € : j'ai trouvé **{len(result['options'])} combinaisons** possibles :\n\n"]
             for i, opt in enumerate(result["options"]):
                 letter = chr(65 + i)
-                ids    = ", ".join(str(f) for f in opt["factures_ids"])
+                ids    = ", ".join(str(f.get("n_facture") or f.get("id") or "?") for f in opt.get("factures", []))
                 lines.append(f"**Option {letter}** : {ids} → {opt['total']:,.2f} € (écart {opt['ecart']:.2f} €)\n\n")
             yield _sse("".join(lines))
-            # Événement choices pour afficher les boutons dans le frontend
-            choices = [
-                {"label": chr(65 + i), "text": f"{', '.join(str(f) for f in opt['factures_ids'])} — {opt['total']:,.2f} €"}
-                for i, opt in enumerate(result["options"])
-            ]
-            yield f"data: {json.dumps({'choices': choices}, ensure_ascii=False)}\n\n"
+            # Événement choices : inclut les détails complets de chaque facture
+            choices = []
+            for i, opt in enumerate(result["options"]):
+                factures_detail = [
+                    {
+                        "date_facturation":  str(f.get("date_facturation")  or ""),
+                        "mois_facturation":  str(f.get("mois_facturation")  or ""),
+                        "n_facture":         str(f.get("n_facture")         or ""),
+                        "projet":            str(f.get("projet")            or ""),
+                        "sous_traitant":     str(f.get("sous_traitant_affecte") or ""),
+                        "mois_prestation":   str(f.get("mois_prestation")   or ""),
+                        "n_contrat":         str(f.get("n_contrat")         or ""),
+                        "client":            str(f.get("client")            or ""),
+                        "montant_ttc":       float(f.get("montant_ttc")     or 0),
+                    }
+                    for f in opt.get("factures", [])
+                ]
+                choices.append({
+                    "label":    chr(65 + i),
+                    "text":     f"{', '.join(fd['n_facture'] or '?' for fd in factures_detail)} — {opt['total']:,.2f} €",
+                    "factures": factures_detail,
+                    "total":    opt["total"],
+                    "ecart":    opt["ecart"],
+                })
+            yield f"data: {json.dumps({'choices': choices}, ensure_ascii=False, default=str)}\n\n"
             return  # pause — attend la réponse du comptable
 
         else:  # pas_de_match
@@ -871,39 +900,165 @@ async def chat_stream(req: ChatRequest):
     )
 
 
+def _write_excel(matches: list[dict], xlsx_path: str, output_path: str) -> dict:
+    """Écrit les résultats du rapprochement dans Base CLient. Pur openpyxl, sans LLM."""
+    import openpyxl
+    from datetime import datetime, date
+
+    _COL_N_FACTURE = 4   # D
+    _COL_STATUT    = 14  # N
+    _COL_DATE_P    = 15  # O
+    _COL_MOIS_P    = 16  # P
+    _COL_MOYEN     = 17  # Q
+    _COL_REF       = 18  # R
+    _SHEET         = "Base CLient"
+
+    def _parse_date(raw):
+        if raw is None:
+            return None
+        if isinstance(raw, (datetime, date)):
+            return datetime(raw.year, raw.month, raw.day) if isinstance(raw, date) else raw
+        try:
+            return datetime.fromisoformat(str(raw)[:10])
+        except ValueError:
+            return None
+
+    paiements: dict[str, dict] = {}
+    for m in matches:
+        if m.get("statut") != "match_exact":
+            continue
+        txn       = m.get("transaction", {})
+        date_op   = _parse_date(txn.get("date_operation"))
+        reference = str(txn.get("reference") or "").strip()
+        mois_p    = date_op.replace(day=1) if date_op else None
+        for fid in m.get("factures_ids", []):
+            paiements[str(fid).strip()] = {"date_p": date_op, "mois_p": mois_p, "ref": reference}
+
+    if not paiements:
+        return {"updated": 0, "skipped": [], "output": output_path,
+                "message": "Aucun match_exact à écrire."}
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Passe 1 — data_only=True : lit les valeurs calculées depuis le cache Excel.
+    # data_only=False ne reconstruit pas les shared-formulas (J/K retournent None),
+    # ce qui provoque leur effacement lors du save. On pré-charge les vraies valeurs ici.
+    wb_ro = openpyxl.load_workbook(xlsx_path, data_only=True)
+    if _SHEET not in wb_ro.sheetnames:
+        wb_ro.close()
+        raise ValueError(f"Onglet '{_SHEET}' introuvable. Onglets : {wb_ro.sheetnames}")
+    ws_ro = wb_ro[_SHEET]
+    try:
+        if ws_ro._cells:
+            ws_ro._max_row = max(r for r, _ in ws_ro._cells)
+    except (AttributeError, ValueError, TypeError):
+        pass
+    # Index par row_num (et non n_facture) — plusieurs lignes peuvent avoir le même n_facture
+    # (ex. FC1181 × 5 lignes CAPGEMINI avec des montants distincts).
+    jk_cache: dict[int, tuple] = {}
+    for rn in range(4, ws_ro.max_row + 1):
+        nf = str(ws_ro.cell(row=rn, column=_COL_N_FACTURE).value or "").strip()
+        if nf:
+            jk_cache[rn] = (
+                ws_ro.cell(row=rn, column=10).value,  # J — Montant TTC
+                ws_ro.cell(row=rn, column=11).value,  # K — Montant HT
+            )
+    wb_ro.close()
+
+    # Passe 2 — data_only=False : préserve les formules du Budget de tréso.
+    wb = openpyxl.load_workbook(xlsx_path, data_only=False)
+    ws = wb[_SHEET]
+    try:
+        if ws._cells:
+            ws._max_row    = max(r for r, _ in ws._cells)
+            ws._max_column = max(c for _, c in ws._cells)
+    except (AttributeError, ValueError, TypeError):
+        pass
+
+    updated = 0
+    skipped = []
+
+    for row_num in range(4, ws.max_row + 1):
+        n_fact = str(ws.cell(row=row_num, column=_COL_N_FACTURE).value or "").strip()
+        if n_fact not in paiements:
+            continue
+        statut_actuel = str(ws.cell(row=row_num, column=_COL_STATUT).value or "").strip().lower()
+        if statut_actuel in {"paye", "payé"}:
+            skipped.append(n_fact)
+            continue
+
+        p = paiements[n_fact]
+        ws.cell(row=row_num, column=_COL_STATUT).value = "payé"
+        ws.cell(row=row_num, column=_COL_DATE_P ).value = p["date_p"]
+        ws.cell(row=row_num, column=_COL_MOIS_P ).value = p["mois_p"]
+        ws.cell(row=row_num, column=_COL_MOYEN  ).value = "virement"
+        ws.cell(row=row_num, column=_COL_REF    ).value = p["ref"]
+
+        # Réinjecter J et K depuis le cache data_only=True (clé = row_num, pas n_facture)
+        if row_num in jk_cache:
+            val_j, val_k = jk_cache[row_num]
+            if val_j is not None:
+                ws.cell(row=row_num, column=10).value = val_j
+            if val_k is not None:
+                ws.cell(row=row_num, column=11).value = val_k
+
+        updated += 1
+
+    wb.save(output_path)
+    wb.close()
+    msg = f"{updated} ligne(s) mises à jour."
+    if skipped:
+        msg += f" Déjà payées (ignorées) : {skipped}."
+    return {"updated": updated, "skipped": skipped, "output": output_path, "message": msg}
+
+
 @app.post("/api/session/{session_id}/export")
 async def export_matrix(session_id: str):
-    """Lance l'Agent Écrivain : écrit les résultats du rapprochement dans la matrice Excel."""
-    from fastapi.responses import FileResponse
+    """Lance l'Agent Écrivain (CrewAI + fallback direct) et retourne la matrice mise à jour."""
     from src.crew.agents.ecrivain.main import run as ecrivain_run
 
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session introuvable.")
     if session.get("state") not in ("done", "reconciling"):
-        raise HTTPException(status_code=400, detail="Rapprochement non terminé.")
+        raise HTTPException(status_code=400, detail=f"État invalide : {session.get('state')}. Le rapprochement doit être terminé.")
 
-    recon = session.get("recon")
-    if not recon or not recon.get("results"):
+    recon = session.get("recon") or {}
+    if not recon.get("results"):
         raise HTTPException(status_code=400, detail="Aucun résultat de rapprochement.")
 
-    xlsx_path   = session.get("xlsx")
+    xlsx_path = session.get("xlsx")
+    if not xlsx_path or not Path(xlsx_path).exists():
+        raise HTTPException(status_code=400, detail=f"Fichier Excel source introuvable : {xlsx_path}")
+
     output_path = str(Path(xlsx_path).parent / ("MATRICE_RAPPROCHEE_" + Path(xlsx_path).name))
 
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None, ecrivain_run, recon["results"], xlsx_path, output_path
-    )
+    try:
+        loop        = asyncio.get_running_loop()
+        result_dict = await loop.run_in_executor(
+            None, ecrivain_run, recon["results"], xlsx_path, output_path
+        )
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"\n[EXPORT ERROR] {type(exc).__name__}: {exc}\n{tb}", flush=True)
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
 
     if not Path(output_path).exists():
-        raise HTTPException(status_code=500, detail="Échec de la génération du fichier.")
+        raise HTTPException(status_code=500, detail="Fichier Excel non créé après l'écriture.")
 
-    sessions[session_id]["export_path"]   = output_path
-    sessions[session_id]["export_result"] = result
-    return FileResponse(
-        path=output_path,
-        filename=Path(output_path).name,
+    sessions[session_id]["export_result"] = result_dict
+
+    try:
+        file_bytes = Path(output_path).read_bytes()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lecture fichier générée échouée : {exc}")
+
+    from fastapi.responses import Response
+    return Response(
+        content=file_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{Path(output_path).name}"'},
     )
 
 

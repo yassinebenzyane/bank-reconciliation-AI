@@ -10,7 +10,7 @@ from pathlib import Path
 
 import openpyxl
 from crewai.tools import BaseTool
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 
 log = logging.getLogger(__name__)
 
@@ -49,9 +49,6 @@ class UpdateBaseClientTool(BaseTool):
         matches = json.loads(matches_json)
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-        wb = openpyxl.load_workbook(xlsx_path, data_only=False, keep_vba=True)
-        ws = wb[_SHEET]
-
         # Construire un index facture_id → données de paiement depuis les matches
         paiements: dict[str, dict] = {}
         for m in matches:
@@ -61,37 +58,69 @@ class UpdateBaseClientTool(BaseTool):
             date_op   = _parse_date(txn.get("date_operation"))
             reference = str(txn.get("reference") or "").strip()
             mois_p    = date_op.replace(day=1) if date_op else None
-
             for fid in m.get("factures_ids", []):
-                paiements[str(fid).strip()] = {
-                    "date_p": date_op,
-                    "mois_p": mois_p,
-                    "ref":    reference,
-                }
+                paiements[str(fid).strip()] = {"date_p": date_op, "mois_p": mois_p, "ref": reference}
 
         if not paiements:
             return json.dumps({"updated": 0, "message": "Aucun match exact à écrire."})
 
+        # Passe 1 — data_only=True : cache les vraies valeurs J/K (shared-formulas)
+        wb_ro = openpyxl.load_workbook(xlsx_path, data_only=True)
+        ws_ro = wb_ro[_SHEET]
+        try:
+            if ws_ro._cells:
+                ws_ro._max_row = max(r for r, _ in ws_ro._cells)
+        except (AttributeError, ValueError, TypeError):
+            pass
+        jk_cache: dict[int, tuple] = {}  # clé = row_num (unique même si n_facture dupliqué)
+        for rn in range(4, ws_ro.max_row + 1):
+            nf = str(ws_ro.cell(row=rn, column=_COL_N_FACTURE).value or "").strip()
+            if nf:
+                jk_cache[rn] = (
+                    ws_ro.cell(row=rn, column=10).value,
+                    ws_ro.cell(row=rn, column=11).value,
+                )
+        wb_ro.close()
+
+        # Passe 2 — data_only=False : préserve les formules Budget de tréso
+        wb = openpyxl.load_workbook(xlsx_path, data_only=False)
+        ws = wb[_SHEET]
+        try:
+            if ws._cells:
+                ws._max_row    = max(r for r, _ in ws._cells)
+                ws._max_column = max(c for _, c in ws._cells)
+        except (AttributeError, ValueError, TypeError):
+            pass
+
         updated = 0
         skipped = []
 
-        for row in ws.iter_rows(min_row=4):
-            n_fact = str(row[_COL_N_FACTURE - 1].value or "").strip()
+        for row_num in range(4, ws.max_row + 1):
+            n_fact = str(ws.cell(row=row_num, column=_COL_N_FACTURE).value or "").strip()
             if n_fact not in paiements:
                 continue
-            statut_actuel = str(row[_COL_STATUT - 1].value or "").strip().lower()
-            if statut_actuel == "paye":
+            statut_actuel = str(ws.cell(row=row_num, column=_COL_STATUT).value or "").strip().lower()
+            if statut_actuel in {"paye", "payé"}:
                 skipped.append(n_fact + " (déjà payé)")
                 continue
 
             p = paiements[n_fact]
-            row[_COL_STATUT - 1].value = "paye"
-            row[_COL_DATE_P  - 1].value = p["date_p"]
-            row[_COL_MOIS_P  - 1].value = p["mois_p"]
-            row[_COL_MOYEN   - 1].value = "virement"
-            row[_COL_REF     - 1].value = p["ref"]
+            ws.cell(row=row_num, column=_COL_STATUT).value = "payé"
+            ws.cell(row=row_num, column=_COL_DATE_P ).value = p["date_p"]
+            ws.cell(row=row_num, column=_COL_MOIS_P ).value = p["mois_p"]
+            ws.cell(row=row_num, column=_COL_MOYEN  ).value = "virement"
+            ws.cell(row=row_num, column=_COL_REF    ).value = p["ref"]
+
+            # Réinjecter J et K depuis le cache (clé = row_num, pas n_facture)
+            if row_num in jk_cache:
+                val_j, val_k = jk_cache[row_num]
+                if val_j is not None:
+                    ws.cell(row=row_num, column=10).value = val_j
+                if val_k is not None:
+                    ws.cell(row=row_num, column=11).value = val_k
+
             updated += 1
-            log.info("Écrivain : L%d %s -> payé %s", row[0].row, n_fact, p["date_p"])
+            log.info("Écrivain : R%d %s → payé %s", row_num, n_fact, p["date_p"])
 
         wb.save(output_path)
         wb.close()

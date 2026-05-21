@@ -1,4 +1,4 @@
-const BASE = "";
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 export interface UploadResult {
   session_id: string;
@@ -77,6 +77,21 @@ export async function getSessionData(sessionId: string): Promise<{ status: strin
   const res = await fetch(`${BASE}/api/session/${sessionId}/data`);
   if (!res.ok) throw new Error(`Data fetch failed (${res.status})`);
   return res.json();
+}
+
+export async function exportMatrix(sessionId: string): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(`${BASE}/api/session/${sessionId}/export`, { method: "POST" });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    let detail = `Export failed (${res.status})`;
+    try { detail = JSON.parse(text)?.detail ?? detail; } catch { detail = text || detail; }
+    throw new Error(detail);
+  }
+  const disposition = res.headers.get("content-disposition") ?? "";
+  const match = disposition.match(/filename[^;=\n]*=([^;\n]*)/);
+  const filename = match ? match[1].replace(/['"]/g, "").trim() : "matrice_updated.xlsx";
+  const blob = await res.blob();
+  return { blob, filename };
 }
 
 export async function checkHealth(): Promise<boolean> {

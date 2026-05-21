@@ -1,8 +1,23 @@
 export type MessageRole = "user" | "assistant" | "system";
 
+export interface Facture {
+  date_facturation: string;
+  mois_facturation: string;
+  n_facture:        string;
+  projet:           string;
+  sous_traitant:    string;
+  mois_prestation:  string;
+  n_contrat:        string;
+  client:           string;
+  montant_ttc:      number;
+}
+
 export interface ChoiceOption {
-  label: string;  // "A", "B", ...
-  text: string;   // "FC1183, FC1184 → 53 346,00 €"
+  label:    string;      // "A", "B", ...
+  text:     string;      // résumé textuel
+  factures?: Facture[];  // détails complets de chaque facture de la combinaison
+  total?:   number;
+  ecart?:   number;
 }
 
 export interface Message {

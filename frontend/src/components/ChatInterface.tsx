@@ -1,11 +1,11 @@
 "use client";
 import { useEffect, useRef, useState, useCallback } from "react";
-import { X, ChevronDown, AlertTriangle, WifiOff, Sparkles } from "lucide-react";
+import { X, ChevronDown, AlertTriangle, WifiOff, Sparkles, Download, Loader2 } from "lucide-react";
 import { MessageBubble } from "./MessageBubble";
 import { MessageInput } from "./MessageInput";
 import { WelcomeScreen } from "./WelcomeScreen";
 import { FileUploadZone } from "./FileUploadZone";
-import { uploadFiles, streamChat } from "@/lib/api";
+import { uploadFiles, streamChat, exportMatrix } from "@/lib/api";
 import { generateId } from "@/lib/utils";
 import type { Message, SessionState, UploadedFile, ChoiceOption } from "@/lib/types";
 
@@ -31,6 +31,8 @@ export function ChatInterface({ backendOnline, onParsed }: ChatInterfaceProps) {
   const [pendingXlsx, setPendingXlsx] = useState<File | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [isParsed, setIsParsed] = useState(false);
+  const [isReconDone, setIsReconDone] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [pendingChoices, setPendingChoices] = useState<ChoiceOption[] | null>(null);
 
   const [session, setSession] = useState<SessionState>({
@@ -90,6 +92,25 @@ export function ChatInterface({ backendOnline, onParsed }: ChatInterfaceProps) {
   const handleChoiceClick = (choice: ChoiceOption) => {
     setPendingChoices(null);
     handleSend(choice.label);
+  };
+
+  const handleExport = async () => {
+    if (!session.sessionId || isExporting) return;
+    setIsExporting(true);
+    try {
+      const { blob, filename } = await exportMatrix(session.sessionId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      addMessage("assistant", `✅ Matrice générée et téléchargée : **${filename}**`);
+    } catch (err) {
+      showError(`Erreur lors de la génération : ${String(err)}`);
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   const handleUpload = useCallback(async () => {
@@ -155,6 +176,9 @@ export function ChatInterface({ backendOnline, onParsed }: ChatInterfaceProps) {
       updateMessage(assistantId, accumulated, false);
       if (text.toLowerCase().includes("lancer") || text.toLowerCase().includes("parser")) {
         setIsParsed(true);
+      }
+      if (accumulated.toLowerCase().includes("générer la matrice") || accumulated.toLowerCase().includes("rapprochement terminé")) {
+        setIsReconDone(true);
       }
     } catch (err) {
       removeMessage(assistantId);
@@ -271,23 +295,97 @@ export function ChatInterface({ backendOnline, onParsed }: ChatInterfaceProps) {
 
             {pendingChoices && !isStreaming && (
               <div className="animate-fade-in px-1">
-                <p className="text-xs text-amber-400 mb-2 font-medium">Choisissez une option :</p>
-                <div className="flex flex-col gap-2">
+                <p className="text-xs text-amber-400 mb-3 font-medium">
+                  Plusieurs combinaisons possibles — choisissez :
+                </p>
+                <div className="flex flex-col gap-4">
                   {pendingChoices.map((opt) => (
-                    <button
+                    <div
                       key={opt.label}
-                      onClick={() => handleChoiceClick(opt)}
-                      className="flex items-center gap-3 px-4 py-2.5 rounded-xl text-left text-sm
-                                 border border-amber-500/30 bg-amber-500/5 text-amber-100
-                                 hover:border-amber-400/60 hover:bg-amber-500/15
-                                 transition-all duration-150"
+                      className="rounded-xl border border-amber-500/30 bg-amber-500/5 overflow-hidden"
                     >
-                      <span className="shrink-0 w-6 h-6 rounded-full bg-amber-500/20 border border-amber-500/40
-                                       flex items-center justify-center text-xs font-bold text-amber-300">
-                        {opt.label}
-                      </span>
-                      <span>{opt.text}</span>
-                    </button>
+                      {/* En-tête de l'option */}
+                      <div className="flex items-center justify-between px-4 py-2.5 border-b border-amber-500/20">
+                        <div className="flex items-center gap-2">
+                          <span className="w-6 h-6 rounded-full bg-amber-500/20 border border-amber-500/40
+                                           flex items-center justify-center text-xs font-bold text-amber-300">
+                            {opt.label}
+                          </span>
+                          <span className="text-sm font-medium text-amber-200">
+                            Option {opt.label}
+                          </span>
+                          {opt.factures && (
+                            <span className="text-xs text-amber-400/70">
+                              · {opt.factures.length} facture{opt.factures.length > 1 ? "s" : ""}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <span className="text-sm font-semibold text-amber-200">
+                            {opt.total?.toLocaleString("fr-FR", { minimumFractionDigits: 2 })} €
+                          </span>
+                          {opt.ecart !== undefined && opt.ecart > 0 && (
+                            <span className="ml-2 text-xs text-amber-400/70">
+                              écart {opt.ecart.toFixed(2)} €
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Tableau des factures */}
+                      {opt.factures && opt.factures.length > 0 && (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="bg-amber-500/10 text-amber-400/80">
+                                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">N° Facture</th>
+                                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Date</th>
+                                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Mois Fact.</th>
+                                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Projet / Contrat</th>
+                                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Sous-traitant</th>
+                                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Mois Prest.</th>
+                                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">N° Contrat</th>
+                                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Client</th>
+                                <th className="px-3 py-2 text-right font-medium whitespace-nowrap">Montant TTC</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {opt.factures.map((f, fi) => (
+                                <tr
+                                  key={fi}
+                                  className="border-t border-amber-500/10 text-slate-300 hover:bg-amber-500/5"
+                                >
+                                  <td className="px-3 py-2 font-mono text-amber-300 whitespace-nowrap">{f.n_facture || "—"}</td>
+                                  <td className="px-3 py-2 whitespace-nowrap">{f.date_facturation || "—"}</td>
+                                  <td className="px-3 py-2 whitespace-nowrap">{f.mois_facturation || "—"}</td>
+                                  <td className="px-3 py-2 max-w-[200px] truncate" title={f.projet}>{f.projet || "—"}</td>
+                                  <td className="px-3 py-2 max-w-[140px] truncate" title={f.sous_traitant}>{f.sous_traitant || "—"}</td>
+                                  <td className="px-3 py-2 whitespace-nowrap">{f.mois_prestation || "—"}</td>
+                                  <td className="px-3 py-2 whitespace-nowrap">{f.n_contrat || "—"}</td>
+                                  <td className="px-3 py-2 whitespace-nowrap">{f.client || "—"}</td>
+                                  <td className="px-3 py-2 text-right font-mono whitespace-nowrap">
+                                    {f.montant_ttc.toLocaleString("fr-FR", { minimumFractionDigits: 2 })} €
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+
+                      {/* Bouton de sélection */}
+                      <div className="px-4 py-2.5 flex justify-end border-t border-amber-500/20">
+                        <button
+                          onClick={() => handleChoiceClick(opt)}
+                          className="px-4 py-1.5 rounded-lg text-sm font-medium
+                                     bg-amber-500/20 border border-amber-500/40 text-amber-200
+                                     hover:bg-amber-500/35 hover:border-amber-400/60
+                                     transition-all duration-150"
+                        >
+                          Choisir l&apos;option {opt.label}
+                        </button>
+                      </div>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -313,6 +411,31 @@ export function ChatInterface({ backendOnline, onParsed }: ChatInterfaceProps) {
                     </button>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {isReconDone && !isStreaming && !pendingChoices && (
+              <div className="animate-fade-in flex justify-center pt-2 pb-1">
+                <button
+                  onClick={handleExport}
+                  disabled={isExporting}
+                  className="flex items-center gap-2.5 px-6 py-3 rounded-xl text-sm font-semibold
+                             bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-800/60
+                             text-white shadow-lg shadow-emerald-500/20
+                             transition-all duration-150 disabled:cursor-not-allowed"
+                >
+                  {isExporting ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Génération en cours…
+                    </>
+                  ) : (
+                    <>
+                      <Download size={16} />
+                      Générer la matrice Excel
+                    </>
+                  )}
+                </button>
               </div>
             )}
 
